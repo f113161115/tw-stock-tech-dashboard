@@ -14,7 +14,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-from datetime import timedelta
+from datetime import timedelta, datetime
 from io import BytesIO
 
 from scraper import (
@@ -24,7 +24,8 @@ from scraper import (
 from strategies import STRATEGIES
 from backtest import (
     run_multi_strategy, kpi_table, BacktestResult,
-    DEFAULT_INITIAL_CAPITAL, DEFAULT_COMMISSION,
+    DEFAULT_INITIAL_CAPITAL, DEFAULT_COMMISSION_RATE, DEFAULT_COMMISSION_MIN,
+    TAX_RATE_REGULAR, TAX_RATE_DAY_TRADE,
 )
 
 
@@ -271,6 +272,37 @@ with st.sidebar:
         key='bt_interval',
     )
 
+    # 根據週期動態給日期範圍
+    _df_for_range = st.session_state.data_60m if bt_interval == '60m' else st.session_state.data_30m
+    if not _df_for_range.empty:
+        _avail_min = _df_for_range['datetime'].min().date()
+        _avail_max = _df_for_range['datetime'].max().date()
+        col_bs, col_be = st.columns(2)
+        with col_bs:
+            bt_start_date = st.date_input(
+                '回測起始日',
+                value=_avail_min,
+                min_value=_avail_min,
+                max_value=_avail_max,
+                key='bt_start_date',
+            )
+        with col_be:
+            bt_end_date = st.date_input(
+                '回測結束日',
+                value=_avail_max,
+                min_value=_avail_min,
+                max_value=_avail_max,
+                key='bt_end_date',
+            )
+        st.caption(
+            f'⏱ 回測期間：{bt_start_date} ~ {bt_end_date}　'
+            f'（{(bt_end_date - bt_start_date).days} 天）'
+        )
+    else:
+        bt_start_date = None
+        bt_end_date = None
+        st.warning(f'尚未抓取 {bt_interval} 資料，無法設定回測期間')
+
     selected_strategy_names = st.multiselect(
         '策略（可多選比較）',
         options=list(STRATEGIES.keys()),
@@ -300,11 +332,32 @@ with st.sidebar:
         step=100000, format='%d',
         key='bt_capital',
     )
-    bt_commission = st.number_input(
-        '每筆手續費 (NT$)',
-        min_value=0, max_value=1000, value=DEFAULT_COMMISSION, step=5,
-        key='bt_commission',
+
+    st.markdown('**💰 交易成本（台股實際規則）**')
+    col_cr, col_cm = st.columns(2)
+    with col_cr:
+        bt_comm_rate = st.number_input(
+            '手續費率 (%)',
+            min_value=0.0, max_value=1.0,
+            value=DEFAULT_COMMISSION_RATE * 100, step=0.0025, format='%.4f',
+            help='券商手續費率（買進+賣出皆收）。台股法定 0.1425%，實際各家券商常給 6 折或 4 折',
+            key='bt_comm_rate',
+        )
+    with col_cm:
+        bt_comm_min = st.number_input(
+            '手續費下限 (元)',
+            min_value=1, max_value=200, value=int(DEFAULT_COMMISSION_MIN), step=1,
+            help='不足下限以下限收取（單筆手續費 < 下限時補到下限）',
+            key='bt_comm_min',
+        )
+    bt_trade_type = st.radio(
+        '交易類型（影響證交稅）',
+        options=['一般股票 (0.3%)', '現股當沖 (0.15%)'],
+        index=0, horizontal=True,
+        help='你的策略（趨勢/反轉持倉數天到數週）屬於「一般股票」。當沖必須同日買賣',
+        key='bt_trade_type',
     )
+    bt_tax_rate = TAX_RATE_DAY_TRADE if '當沖' in bt_trade_type else TAX_RATE_REGULAR
 
     run_backtest_btn = st.button(
         '▶ 執行回測',
@@ -435,7 +488,7 @@ def render_price_metric(df: pd.DataFrame) -> None:
     m1.metric('現價', f'{last_close:.2f}')
     m2.metric('漲跌', f'{delta:+.2f}', delta=f'{delta:+.2f}')
     m3.metric('漲跌幅', f'{pct:+.2f}%', delta=f'{pct:+.2f}%')
-    m4.metric('最後更新', last_time.strftime('%m/%d %H:%M'))
+    m4.metric('最後更新', last_time.strftime('%Y/%m/%d %H:%M'))
     st.caption(f'📌 對照基準：30 分鐘 K 棒最末兩筆（{symbol}）')
 
 
@@ -446,7 +499,57 @@ render_price_metric(df_30)
 col_left, col_right = st.columns(2)
 
 # ---- 左上：折線圖（用 60 分鐘資料，因為歷史較長） ----
+# ---- 左：OHLC 表格（30m 資料，含成交量）----
 with col_left:
+    st.subheader('📋 OHLC 資料表（30 分鐘）')
+
+    if df_30.empty:
+        st.warning('沒有 30 分鐘資料可顯示')
+    else:
+        min_date = df_30['datetime'].min().date()
+        max_date = df_30['datetime'].max().date()
+        default_start = max(min_date, max_date - timedelta(days=50))
+
+        ohlc_start = st.date_input(
+            '挑選起始日期（往後顯示 50 天）',
+            value=default_start,
+            min_value=min_date,
+            max_value=max_date,
+            key='ohlc_start_date',
+        )
+
+        df_ohlc = filter_50_days(df_30, ohlc_start)
+        if df_ohlc.empty:
+            st.info('此區間沒有資料')
+        else:
+            # 把 datetime 拆成「日期」「時間」兩欄、欄名中文化
+            tbl = pd.DataFrame({
+                '日期':   df_ohlc['datetime'].dt.date,
+                '時間':   df_ohlc['datetime'].dt.strftime('%H:%M'),
+                '開盤價': df_ohlc['open'].round(2),
+                '最高價': df_ohlc['high'].round(2),
+                '最低價': df_ohlc['low'].round(2),
+                '收盤價': df_ohlc['close'].round(2),
+                '成交量': df_ohlc['volume'].astype('int64'),
+            })
+            # 倒序：最新的在最上面（看盤習慣）
+            tbl = tbl.iloc[::-1].reset_index(drop=True)
+            st.dataframe(tbl, use_container_width=True, height=440, hide_index=True)
+            st.caption(f'共 {len(tbl)} 筆 K 棒（最新在最上方）')
+
+        # 下載 30m CSV
+        st.download_button(
+            '⬇ 下載 30 分鐘資料（CSV，完整 ~60 天）',
+            df_30.to_csv(index=False).encode('utf-8-sig'),
+            file_name=f'{symbol.replace(".", "_")}_30m.csv',
+            mime='text/csv',
+            use_container_width=True,
+            key='dl_30m_main',
+        )
+
+
+# ---- 右：折線圖（60m 資料）----
+with col_right:
     st.subheader('📈 股價折線圖（60 分鐘）')
 
     if df_60.empty:
@@ -454,7 +557,6 @@ with col_left:
     else:
         min_date = df_60['datetime'].min().date()
         max_date = df_60['datetime'].max().date()
-        # 預設起始日：往前 50 天
         default_start = max(min_date, max_date - timedelta(days=50))
 
         line_start = st.date_input(
@@ -462,7 +564,7 @@ with col_left:
             value=default_start,
             min_value=min_date,
             max_value=max_date,
-            key='line_start_date'
+            key='line_start_date',
         )
 
         df_line = filter_50_days(df_60, line_start)
@@ -476,7 +578,7 @@ with col_left:
             st.plotly_chart(fig, use_container_width=True)
             st.caption(f'共 {len(df_line)} 筆 K 棒')
 
-        # 下載 60m CSV（完整資料，不只當前篩選範圍）
+        # 下載 60m CSV
         st.download_button(
             '⬇ 下載 60 分鐘資料（CSV，完整 ~730 天）',
             df_60.to_csv(index=False).encode('utf-8-sig'),
@@ -484,47 +586,6 @@ with col_left:
             mime='text/csv',
             use_container_width=True,
             key='dl_60m_main',
-        )
-
-
-# ---- 右上：K 線圖（用 30 分鐘資料，較細） ----
-with col_right:
-    st.subheader('🕯️ K 線圖（30 分鐘）')
-
-    if df_30.empty:
-        st.warning('沒有 30 分鐘資料可顯示')
-    else:
-        min_date = df_30['datetime'].min().date()
-        max_date = df_30['datetime'].max().date()
-        default_start = max(min_date, max_date - timedelta(days=50))
-
-        candle_start = st.date_input(
-            '挑選起始日期（往後顯示 50 天）',
-            value=default_start,
-            min_value=min_date,
-            max_value=max_date,
-            key='candle_start_date'
-        )
-
-        df_candle = filter_50_days(df_30, candle_start)
-        if df_candle.empty:
-            st.info('此區間沒有資料')
-        else:
-            fig = make_candle_chart(
-                df_candle,
-                f'{symbol} K 線（{candle_start} ~ {candle_start + timedelta(days=50)}）'
-            )
-            st.plotly_chart(fig, use_container_width=True)
-            st.caption(f'共 {len(df_candle)} 筆 K 棒')
-
-        # 下載 30m CSV（完整資料，不只當前篩選範圍）
-        st.download_button(
-            '⬇ 下載 30 分鐘資料（CSV，完整 ~60 天）',
-            df_30.to_csv(index=False).encode('utf-8-sig'),
-            file_name=f'{symbol.replace(".", "_")}_30m.csv',
-            mime='text/csv',
-            use_container_width=True,
-            key='dl_30m_main',
         )
 
 
@@ -552,32 +613,58 @@ if refresh:
 
 # ============ 執行回測（按鈕在側邊欄） ============
 if run_backtest_btn:
-    df_bt = df_60 if bt_interval == '60m' else df_30
-    if df_bt.empty:
+    df_full = df_60 if bt_interval == '60m' else df_30
+    if df_full.empty:
         st.error(f'❌ 沒有 {bt_interval} 資料，無法回測')
+    elif bt_start_date is None or bt_end_date is None:
+        st.error('❌ 請先設定回測期間')
+    elif bt_start_date > bt_end_date:
+        st.error('❌ 回測起始日不可晚於結束日')
     else:
-        chosen = {n: STRATEGIES[n] for n in selected_strategy_names}
-        with st.spinner(f'回測 {len(chosen)} 個策略中...'):
-            bt_results = run_multi_strategy(
-                df              = df_bt,
-                strategy_funcs  = chosen,
-                initial_capital = float(bt_capital),
-                commission      = float(bt_commission),
-                stop_loss_pct   = float(bt_stop_loss),
-                take_profit_pct = float(bt_take_profit),
-                interval        = bt_interval,
+        # 用使用者選的日期切片
+        mask = (df_full['datetime'].dt.date >= bt_start_date) & \
+               (df_full['datetime'].dt.date <= bt_end_date)
+        df_bt = df_full.loc[mask].reset_index(drop=True)
+
+        if df_bt.empty:
+            st.error(f'❌ 此期間沒有 {bt_interval} 資料')
+        else:
+            chosen = {n: STRATEGIES[n] for n in selected_strategy_names}
+            with st.spinner(f'回測 {len(chosen)} 個策略中（{len(df_bt):,} 筆 K 棒）...'):
+                bt_results = run_multi_strategy(
+                    df              = df_bt,
+                    strategy_funcs  = chosen,
+                    initial_capital = float(bt_capital),
+                    commission_rate = bt_comm_rate / 100.0,    # UI 是 %、引擎用比例
+                    commission_min  = float(bt_comm_min),
+                    tax_rate        = bt_tax_rate,
+                    stop_loss_pct   = float(bt_stop_loss),
+                    take_profit_pct = float(bt_take_profit),
+                    interval        = bt_interval,
+                )
+            st.session_state.bt_results = bt_results
+            st.session_state.bt_meta = {
+                'symbol':           symbol,
+                'interval':         bt_interval,
+                'capital':          bt_capital,
+                'commission_rate':  bt_comm_rate,             # %
+                'commission_min':   bt_comm_min,              # NT$
+                'trade_type':       bt_trade_type,
+                'tax_rate':         bt_tax_rate * 100,        # %
+                'stop_loss_pct':    bt_stop_loss,
+                'take_profit_pct':  bt_take_profit,
+                'bt_start_date':    bt_start_date.isoformat(),
+                'bt_end_date':      bt_end_date.isoformat(),
+                'bt_days':          (bt_end_date - bt_start_date).days,
+                'bt_bars':          len(df_bt),
+                'generated_at':     datetime.now().strftime('%Y/%m/%d %H:%M:%S'),
+                'df':               df_bt,
+            }
+            st.success(
+                f'✓ 回測完成（{symbol} · {bt_interval} · '
+                f'{bt_start_date}~{bt_end_date} · {(bt_end_date-bt_start_date).days} 天 · '
+                f'{len(bt_results)} 策略）'
             )
-        st.session_state.bt_results = bt_results
-        st.session_state.bt_meta = {
-            'symbol':          symbol,
-            'interval':        bt_interval,
-            'capital':         bt_capital,
-            'commission':      bt_commission,
-            'stop_loss_pct':   bt_stop_loss,
-            'take_profit_pct': bt_take_profit,
-            'df':              df_bt,
-        }
-        st.success(f'✓ 回測完成（{symbol} · {bt_interval} · {len(bt_results)} 個策略）')
 
 
 # ============ 回測結果區（左：圖、右：KPI 表格） ============
@@ -683,8 +770,13 @@ def build_excel_bytes(results: list, meta: dict) -> bytes:
             trades_df = pd.DataFrame([{
                 '進場時間': t.entry_time, '進場價': t.entry_price,
                 '出場時間': t.exit_time, '出場價': t.exit_price,
-                '張數(股)': t.shares, '損益(NT$)': t.pnl,
-                '報酬%': t.return_pct, '手續費': t.commission,
+                '股數': t.shares,
+                '損益(NT$)': round(t.pnl, 2),
+                '報酬%': round(t.return_pct, 2),
+                '進場手續費': round(t.entry_commission, 2),
+                '出場手續費': round(t.exit_commission, 2),
+                '證交稅':     round(t.tax, 2),
+                '總成本':     round(t.total_cost, 2),
                 '出場原因': t.exit_reason,
             } for t in r.trades])
             # Excel 工作表名長度 ≤ 31 字
@@ -748,9 +840,16 @@ if bt_results:
             st.error(f'Excel 匯出失敗（需 openpyxl）：{e}')
 
         st.caption(
-            f'資料：{bt_meta["symbol"]} · {bt_meta["interval"]} · '
-            f'資金 NT$ {bt_meta["capital"]:,} · 手續費 NT$ {bt_meta["commission"]} · '
-            f'停損 {bt_meta["stop_loss_pct"]}% · 停利 {bt_meta["take_profit_pct"]}%'
+            f'📊 **資料**：{bt_meta["symbol"]} · {bt_meta["interval"]} · '
+            f'{bt_meta.get("bt_bars", "?")} 筆 K 棒\n\n'
+            f'⏱ **回測期間**：{bt_meta.get("bt_start_date", "?")} ~ {bt_meta.get("bt_end_date", "?")} '
+            f'（共 {bt_meta.get("bt_days", "?")} 天）\n\n'
+            f'💰 **資金**：NT$ {bt_meta["capital"]:,.0f}\n\n'
+            f'💸 **手續費**：{bt_meta.get("commission_rate", "?")}% '
+            f'（不足 NT$ {bt_meta.get("commission_min", "?")} 進位）\n\n'
+            f'🏛 **證交稅**：{bt_meta.get("tax_rate", "?")}%（{bt_meta.get("trade_type", "?")}）\n\n'
+            f'🛡 **停損**：{bt_meta["stop_loss_pct"]}%　·　🎯 **停利**：{bt_meta["take_profit_pct"]}%\n\n'
+            f'🕐 **報告生成**：{bt_meta.get("generated_at", "?")}'
         )
 
 
