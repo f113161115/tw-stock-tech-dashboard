@@ -130,46 +130,7 @@ st.title('📊 台股技術分析儀表板')
 st.caption('資料來源：Yahoo Finance（透過 yfinance API）  ·  支援 30 分鐘 / 60 分鐘 K 棒')
 
 
-# ============ 資料範圍提示區（用今天日期當基準舉例） ============
-def render_data_range_banner():
-    """主畫面上方顯眼說明：目前可回測範圍、今天日期、Yahoo 限制。"""
-    today = datetime.now().date()
-    df_30 = st.session_state.get('data_30m', pd.DataFrame())
-    df_60 = st.session_state.get('data_60m', pd.DataFrame())
-
-    if df_30.empty and df_60.empty:
-        st.info(f'📅 今天是 **{today}**，請先在側邊欄抓取資料。')
-        return
-
-    info_30 = (
-        f"{df_30['datetime'].min().date()} ~ {df_30['datetime'].max().date()}　"
-        f"(共 {(df_30['datetime'].max().date() - df_30['datetime'].min().date()).days} 天，"
-        f"{len(df_30):,} 筆)"
-        if not df_30.empty else '— 尚未抓取 —'
-    )
-    info_60 = (
-        f"{df_60['datetime'].min().date()} ~ {df_60['datetime'].max().date()}　"
-        f"(共 {(df_60['datetime'].max().date() - df_60['datetime'].min().date()).days} 天，"
-        f"{len(df_60):,} 筆)"
-        if not df_60.empty else '— 尚未抓取 —'
-    )
-
-    # 用今天日期推算「Yahoo 規則允許的最大可回溯」
-    max_30_start = today - timedelta(days=60)
-    max_60_start = today - timedelta(days=730)
-
-    st.info(
-        f"📅 **今天**：{today}　·　"
-        f"請在 **側邊欄 ➡** 設定要回測的日期範圍（已自動帶入最大可選範圍、必填）\n\n"
-        f"**目前資料可回測範圍（Yahoo 限制）：**\n"
-        f"- ⏱ **30 分鐘 K**：{info_30}　│ 上限 60 天，最早 {max_30_start}\n"
-        f"- 📈 **60 分鐘 K**：{info_60}　│ 上限 730 天（~2 年），最早 {max_60_start}\n\n"
-        f"💡 想回測「今年到現在」就把起始日改 {today.replace(month=1, day=1)}；"
-        f"想回測「過去 1 個月」就改 {today - timedelta(days=30)}。"
-    )
-
-
-# render_data_range_banner() 在「取得 df_30/df_60」之後才呼叫（見下方）
+# 資料範圍提示已搬到側邊欄（簡化版）
 
 
 # ============ 台股代碼 → 公司名 對照表（給 UI 顯示用） ============
@@ -341,6 +302,23 @@ with st.sidebar:
                 st.rerun()
 
     st.markdown('---')
+    # ---- 第 3 區：今天日期 + 資料範圍簡化提示（從主畫面搬下來） ----
+    _today = datetime.now().date()
+    _df60 = st.session_state.get('data_60m', pd.DataFrame())
+    _df30 = st.session_state.get('data_30m', pd.DataFrame())
+    st.caption(f'📅 今天：**{_today}**')
+    if not _df30.empty:
+        st.caption(
+            f'⏱ 30m：{_df30["datetime"].min().date()} ~ {_df30["datetime"].max().date()}'
+            f'（{len(_df30):,} 筆）'
+        )
+    if not _df60.empty:
+        st.caption(
+            f'📈 60m：{_df60["datetime"].min().date()} ~ {_df60["datetime"].max().date()}'
+            f'（{len(_df60):,} 筆）'
+        )
+
+    st.markdown('---')
     with st.expander('📖 資料來源 & Yahoo 限制'):
         st.markdown(
             """
@@ -349,163 +327,10 @@ with st.sidebar:
             **Yahoo 對盤中（intraday）K 棒的歷史限制：**
             - 30 分鐘：最多回溯 **60 天**
             - 60 分鐘：最多回溯 **730 天**（約 2 年）
-            - 1 日：可抓全歷史
 
-            這是 Yahoo 平台規則，不是程式問題。
-            抓到的資料會自動存到 `data/` 資料夾（CSV）
-            與 `output/` 資料夾（Excel），
-            供回測與報告使用。
+            抓到的資料會自動存到 `data/`（CSV）+ `output/`（Excel）。
             """
         )
-
-    st.markdown('---')
-    st.markdown('### 📊 策略回測')
-
-    bt_interval = st.radio(
-        '回測週期',
-        options=['60m', '30m'],
-        horizontal=True,
-        help='60m 資料較長（~2 年）；30m 較細但只 60 天',
-        key='bt_interval',
-    )
-
-    # 根據週期動態給日期範圍
-    _df_for_range = st.session_state.data_60m if bt_interval == '60m' else st.session_state.data_30m
-    if not _df_for_range.empty:
-        _avail_min = _df_for_range['datetime'].min().date()
-        _avail_max = _df_for_range['datetime'].max().date()
-
-        # 顯眼提示「可選範圍 + 預設帶入最大」
-        st.caption(
-            f'📌 **可選範圍**：{_avail_min} ~ {_avail_max}　'
-            f'(共 {(_avail_max - _avail_min).days} 天)　·　已預設帶入最大區間'
-        )
-
-        col_bs, col_be = st.columns(2)
-        with col_bs:
-            bt_start_date = st.date_input(
-                '回測起始日 *（必填）',
-                value=_avail_min,
-                min_value=_avail_min,
-                max_value=_avail_max,
-                key='bt_start_date',
-                help=f'可選範圍：{_avail_min} ~ {_avail_max}',
-            )
-        with col_be:
-            bt_end_date = st.date_input(
-                '回測結束日 *（必填）',
-                value=_avail_max,
-                min_value=_avail_min,
-                max_value=_avail_max,
-                key='bt_end_date',
-                help=f'可選範圍：{_avail_min} ~ {_avail_max}',
-            )
-
-        # 雙保險：超出範圍/邏輯錯誤的警告
-        if bt_start_date < _avail_min or bt_end_date > _avail_max:
-            st.error(
-                f'⚠ 你選的日期超出可用範圍！\n\n'
-                f'可選：{_avail_min} ~ {_avail_max}'
-            )
-        elif bt_start_date > bt_end_date:
-            st.error(f'⚠ 起始日（{bt_start_date}）不可晚於結束日（{bt_end_date}）')
-        else:
-            st.caption(
-                f'⏱ **目前回測期間**：{bt_start_date} ~ {bt_end_date}　'
-                f'(共 **{(bt_end_date - bt_start_date).days}** 天)'
-            )
-    else:
-        bt_start_date = None
-        bt_end_date = None
-        st.warning(f'⚠ 尚未抓取 {bt_interval} 資料，無法設定回測期間。請先在側邊欄上方挑一檔股票。')
-
-    selected_strategy_names = st.multiselect(
-        '策略 *（必填，可多選比較）',
-        options=list(STRATEGIES.keys()),
-        default=['① 均線突破 (MA20)', '② RSI + 趨勢濾網 (MA60)'],
-        help='至少選 1 個策略才能執行回測',
-        key='bt_strategies',
-    )
-    if not selected_strategy_names:
-        st.warning('⚠ 請至少選擇 1 個策略')
-
-    col_sl, col_tp = st.columns(2)
-    with col_sl:
-        bt_stop_loss = st.number_input(
-            '停損 %',
-            min_value=0.0, max_value=50.0, value=5.0, step=0.5,
-            help='0 = 不啟用。例如 5 代表虧損 5% 強制平倉',
-            key='bt_sl',
-        )
-    with col_tp:
-        bt_take_profit = st.number_input(
-            '停利 %',
-            min_value=0.0, max_value=200.0, value=10.0, step=1.0,
-            help='0 = 不啟用。例如 10 代表獲利 10% 落袋',
-            key='bt_tp',
-        )
-
-    bt_capital = st.number_input(
-        '初始資金 (NT$)',
-        min_value=10000, max_value=100_000_000, value=DEFAULT_INITIAL_CAPITAL,
-        step=100000, format='%d',
-        key='bt_capital',
-    )
-
-    st.markdown('**💰 交易成本（台股實際規則）**')
-
-    with st.expander('📖 常見券商手續費（自行抄到下方）', expanded=False):
-        st.markdown(
-            """
-            > 📅 **資料時效：2026 年底**　·　實際以各券商最新公告為準
-
-            | 券商 / 方案 | 折扣 | 費率 |
-            |---|---|---|
-            | 法定原價 | ─ | **0.1425%** |
-            | 元大 / 一般電子單 | 6 折 | **0.0855%** |
-            | 多家券商 VIP | 5 折 | **0.0713%** |
-            | 多家券商熟客 | 4 折 | **0.0570%** |
-            | **國泰證券 電子單** ⭐ | **2.8 折** | **0.0399%** |
-            | **永豐證券 電子單** ⭐ | **2 折** | **0.0285%** |
-            | 部分券商最低 | 1.68 折 | **0.0239%** |
-
-            > 計算方式：`法定 0.1425% × 折扣` ；下限多為 NT\\$ 20
-            > 把對應費率抄到下方欄位即可。
-            """
-        )
-
-    col_cr, col_cm = st.columns(2)
-    with col_cr:
-        bt_comm_rate = st.number_input(
-            '手續費率 (%) ─ 自行填寫',
-            min_value=0.0, max_value=1.0,
-            value=DEFAULT_COMMISSION_RATE * 100, step=0.0025, format='%.4f',
-            help='券商手續費率（買進+賣出皆收）。預設 0.1425% = 法定原價；國泰 2.8 折請填 0.0399',
-            key='bt_comm_rate',
-        )
-    with col_cm:
-        bt_comm_min = st.number_input(
-            '手續費下限 (元)',
-            min_value=1, max_value=200, value=int(DEFAULT_COMMISSION_MIN), step=1,
-            help='單筆手續費若不足下限，以下限收取。台股各券商多為 NT$20',
-            key='bt_comm_min',
-        )
-    bt_trade_type = st.radio(
-        '交易類型（影響證交稅）',
-        options=['一般股票 (0.3%)', '現股當沖 (0.15%)'],
-        index=0, horizontal=True,
-        help='你的策略（趨勢/反轉持倉數天到數週）屬於「一般股票」。當沖必須同日買賣',
-        key='bt_trade_type',
-    )
-    bt_tax_rate = TAX_RATE_DAY_TRADE if '當沖' in bt_trade_type else TAX_RATE_REGULAR
-
-    run_backtest_btn = st.button(
-        '▶ 執行回測',
-        use_container_width=True,
-        type='primary',
-        disabled=(len(selected_strategy_names) == 0),
-        key='bt_run',
-    )
 
 
 # ============ 首次進入自動抓 1802.TW ============
@@ -563,25 +388,7 @@ def render_top_bar():
             st.success(f'✓ 已切換到 {get_stock_display(new_sym_top)}')
             st.rerun()
 
-    # Step 進度引導
-    has_data = not (df_30.empty and df_60.empty)
-    has_results = bool(st.session_state.bt_results)
-    s1 = '✅' if has_data else '⬜'
-    s2 = '✅' if has_results else ('▶' if has_data else '⬜')
-    s3 = '✅' if has_results else '⬜'
-    st.caption(
-        f'**操作流程**：&nbsp;&nbsp;'
-        f'{s1} **Step 1** 選股票（最上面 / 側邊欄）&nbsp;&nbsp;→&nbsp;&nbsp;'
-        f'{s2} **Step 2** 側邊欄設定回測（期間/策略/停損/手續費）→ 按「執行回測」&nbsp;&nbsp;→&nbsp;&nbsp;'
-        f'{s3} **Step 3** 看結果（可點左上 « 收起側邊欄看大圖）'
-    )
-
-
 render_top_bar()
-
-
-# ============ 在主畫面顯示資料範圍提示 ============
-render_data_range_banner()
 
 
 # ============ 圖表繪製函式 ============
@@ -640,17 +447,17 @@ def make_line_chart(df: pd.DataFrame, title: str) -> go.Figure:
 
 
 def make_candle_chart(df: pd.DataFrame, title: str) -> go.Figure:
-    """建立 K 線圖（紅漲 鸢尾蓝跌，配合宣紙白主題）。"""
+    """建立 K 線圖（台股標準：紅漲綠跌、實心 K 棒）。"""
     fig = go.Figure(data=[go.Candlestick(
         x=df['datetime'],
         open=df['open'],
         high=df['high'],
         low=df['low'],
         close=df['close'],
-        increasing_line_color='#C0392B',     # 紅 K（台股慣例：紅 = 上漲）
-        increasing_fillcolor='#C0392B',
-        decreasing_line_color='#1660AB',     # 鸢尾蓝（跌）
-        decreasing_fillcolor='#1660AB',
+        increasing_line_color='#D32F2F',     # 紅 K（台股慣例：紅 = 漲）
+        increasing_fillcolor='#D32F2F',
+        decreasing_line_color='#00A651',     # 綠 K（台股慣例：綠 = 跌）
+        decreasing_fillcolor='#00A651',
         line=dict(width=1),
         name='K 線'
     )])
@@ -694,7 +501,6 @@ def render_price_metric(df: pd.DataFrame) -> None:
     m2.metric('漲跌', f'{delta:+.2f}', delta=f'{delta:+.2f}')
     m3.metric('漲跌幅', f'{pct:+.2f}%', delta=f'{pct:+.2f}%')
     m4.metric('最後更新', last_time.strftime('%Y/%m/%d %H:%M'))
-    st.caption(f'📌 對照基準：30 分鐘 K 棒最末兩筆（{symbol}）')
 
 
 render_price_metric(df_30)
@@ -725,8 +531,8 @@ else:
         st.plotly_chart(fig_k, use_container_width=True)
         st.caption(f'共 {len(df_candle)} 筆 K 棒')
 
-# ---- 下方：OHLC 表格（30m，含成交量），用 expander 包起來省空間 ----
-with st.expander('📋 OHLC 資料表（30 分鐘，點擊展開／收合）', expanded=False):
+# ---- 下方：OHLC 表格（30m，含成交量），預設摺疊 ----
+with st.expander('📋 OHLC 資料表（30 分鐘）', expanded=False):
     if df_30.empty:
         st.warning('沒有 30 分鐘資料可顯示')
     else:
@@ -742,35 +548,174 @@ with st.expander('📋 OHLC 資料表（30 分鐘，點擊展開／收合）', e
                 '最低價': df_ohlc['low'].round(2),
                 '收盤價': df_ohlc['close'].round(2),
                 '成交量': df_ohlc['volume'].astype('int64'),
-            }).iloc[::-1].reset_index(drop=True)  # 倒序：最新在上
+            }).iloc[::-1].reset_index(drop=True)
             st.dataframe(tbl, use_container_width=True, height=400, hide_index=True)
-            st.caption(f'共 {len(tbl)} 筆 K 棒（最新在最上方）')
+            st.caption(f'共 {len(tbl)} 筆 K 棒（最新在最上方）　·　下載請至下方「📥 下載資料」區')
 
-        # 下載 30m CSV
-        st.download_button(
-            '⬇ 下載 30 分鐘資料（CSV，完整 ~60 天）',
-            df_30.to_csv(index=False).encode('utf-8-sig'),
-            file_name=f'{symbol.replace(".", "_")}_30m.csv',
-            mime='text/csv',
-            use_container_width=True,
-            key='dl_30m_main',
+# ============ 📥 下載資料區（30m / 60m × CSV / Excel） ============
+
+def df_to_excel_bytes(df: pd.DataFrame, sheet_name: str = 'OHLCV') -> bytes:
+    """單一 DataFrame 轉 .xlsx bytes（給 streamlit download_button 用）。"""
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine='openpyxl') as w:
+        df.to_excel(w, sheet_name=sheet_name, index=False)
+    return buf.getvalue()
+
+
+with st.expander('📥 下載資料（CSV / Excel · 30 分鐘 / 60 分鐘）', expanded=False):
+    st.caption('檔名格式：{股票代碼}_{週期}.csv 或 .xlsx')
+    safe_sym = symbol.replace('.', '_')
+
+    col_30, col_60 = st.columns(2)
+    with col_30:
+        st.markdown(f'**30 分鐘**　{len(df_30):,} 筆' if not df_30.empty else '**30 分鐘**　無資料')
+        if not df_30.empty:
+            st.download_button(
+                '⬇ CSV', df_30.to_csv(index=False).encode('utf-8-sig'),
+                file_name=f'{safe_sym}_30m.csv', mime='text/csv',
+                use_container_width=True, key='dl_30m_csv',
+            )
+            st.download_button(
+                '⬇ Excel', df_to_excel_bytes(df_30, '30m_OHLCV'),
+                file_name=f'{safe_sym}_30m.xlsx',
+                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                use_container_width=True, key='dl_30m_xlsx',
+            )
+
+    with col_60:
+        st.markdown(f'**60 分鐘**　{len(df_60):,} 筆' if not df_60.empty else '**60 分鐘**　無資料')
+        if not df_60.empty:
+            st.download_button(
+                '⬇ CSV', df_60.to_csv(index=False).encode('utf-8-sig'),
+                file_name=f'{safe_sym}_60m.csv', mime='text/csv',
+                use_container_width=True, key='dl_60m_csv',
+            )
+            st.download_button(
+                '⬇ Excel', df_to_excel_bytes(df_60, '60m_OHLCV'),
+                file_name=f'{safe_sym}_60m.xlsx',
+                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                use_container_width=True, key='dl_60m_xlsx',
+            )
+
+
+# ============ 📊 回測設定區（從側邊欄搬到主畫面） ============
+st.markdown('---')
+with st.expander('📊 策略回測設定（點擊展開／收合）', expanded=True):
+
+    # 第 1 列：週期 + 日期範圍
+    bt_interval = st.radio(
+        '回測週期 *',
+        options=['60m', '30m'],
+        horizontal=True,
+        help='60m 資料較長（~2 年）；30m 較細但只 60 天',
+        key='bt_interval',
+    )
+
+    _df_for_range = df_60 if bt_interval == '60m' else df_30
+    if not _df_for_range.empty:
+        _avail_min = _df_for_range['datetime'].min().date()
+        _avail_max = _df_for_range['datetime'].max().date()
+        st.caption(
+            f'📌 可選範圍：**{_avail_min}** ~ **{_avail_max}**（共 {(_avail_max - _avail_min).days} 天）'
+        )
+        col_bs, col_be = st.columns(2)
+        with col_bs:
+            bt_start_date = st.date_input(
+                '回測起始日 *',
+                value=_avail_min, min_value=_avail_min, max_value=_avail_max,
+                key='bt_start_date',
+            )
+        with col_be:
+            bt_end_date = st.date_input(
+                '回測結束日 *',
+                value=_avail_max, min_value=_avail_min, max_value=_avail_max,
+                key='bt_end_date',
+            )
+        if bt_start_date > bt_end_date:
+            st.error(f'⚠ 起始日（{bt_start_date}）不可晚於結束日（{bt_end_date}）')
+    else:
+        bt_start_date = None
+        bt_end_date = None
+        st.warning(f'⚠ 尚未抓取 {bt_interval} 資料')
+
+    # 第 2 列：策略多選
+    selected_strategy_names = st.multiselect(
+        '策略 *（必填，可多選比較）',
+        options=list(STRATEGIES.keys()),
+        default=['① 均線突破 (MA20)', '② RSI + 趨勢濾網 (MA60)', '🅑 Buy & Hold（基準）'],
+        help='至少選 1 個。預設加入 Buy & Hold 當對照基準',
+        key='bt_strategies',
+    )
+
+    # 第 3 列：停損 / 停利 / 初始資金
+    col_sl, col_tp, col_cap = st.columns(3)
+    with col_sl:
+        bt_stop_loss = st.number_input(
+            '停損 %', min_value=0.0, max_value=50.0, value=5.0, step=0.5,
+            help='0=不啟用', key='bt_sl',
+        )
+    with col_tp:
+        bt_take_profit = st.number_input(
+            '停利 %', min_value=0.0, max_value=200.0, value=10.0, step=1.0,
+            help='0=不啟用', key='bt_tp',
+        )
+    with col_cap:
+        bt_capital = st.number_input(
+            '初始資金 (NT$)',
+            min_value=10000, max_value=100_000_000, value=DEFAULT_INITIAL_CAPITAL,
+            step=100000, format='%d', key='bt_capital',
         )
 
-# ---- 60m 資料下載（保留，給回測用） ----
-if not df_60.empty:
-    with st.expander('📈 60 分鐘資料下載（給回測用）', expanded=False):
-        st.caption(f'共 {len(df_60):,} 筆 K 棒，範圍 {df_60["datetime"].min().date()} ~ {df_60["datetime"].max().date()}')
-        st.download_button(
-            '⬇ 下載 60 分鐘資料（CSV，完整 ~730 天）',
-            df_60.to_csv(index=False).encode('utf-8-sig'),
-            file_name=f'{symbol.replace(".", "_")}_60m.csv',
-            mime='text/csv',
-            use_container_width=True,
-            key='dl_60m_main',
+    # 第 4 列：交易成本
+    st.markdown('**💰 交易成本**')
+    with st.expander('📖 常見券商手續費參考（國泰 2.8 折 = 0.0399%、永豐 2 折 = 0.0285%）', expanded=False):
+        st.markdown(
+            """
+            > 📅 資料時效：**2026 年底**　·　以各券商最新公告為準
+
+            | 券商 / 方案 | 折扣 | 費率 |
+            |---|---|---|
+            | 法定原價 | ─ | **0.1425%** |
+            | 元大 / 一般電子單 | 6 折 | 0.0855% |
+            | 5 折 / 4 折 | 5/4 折 | 0.0713% / 0.0570% |
+            | **國泰證券** ⭐ | 2.8 折 | **0.0399%** |
+            | **永豐證券** ⭐ | 2 折 | **0.0285%** |
+            """
         )
+    col_cr, col_cm, col_tt = st.columns(3)
+    with col_cr:
+        bt_comm_rate = st.number_input(
+            '手續費率 (%)',
+            min_value=0.0, max_value=1.0,
+            value=DEFAULT_COMMISSION_RATE * 100, step=0.0025, format='%.4f',
+            help='券商實際費率，預設 0.1425% (法定)',
+            key='bt_comm_rate',
+        )
+    with col_cm:
+        bt_comm_min = st.number_input(
+            '手續費下限 (元)',
+            min_value=1, max_value=200, value=int(DEFAULT_COMMISSION_MIN), step=1,
+            key='bt_comm_min',
+        )
+    with col_tt:
+        bt_trade_type = st.radio(
+            '交易類型', options=['一般股票', '現股當沖'],
+            index=0, horizontal=True,
+            help='一般 0.3% 證交稅 / 當沖 0.15%',
+            key='bt_trade_type',
+        )
+    bt_tax_rate = TAX_RATE_DAY_TRADE if '當沖' in bt_trade_type else TAX_RATE_REGULAR
+
+    # 執行按鈕
+    run_backtest_btn = st.button(
+        '▶ 執行回測',
+        use_container_width=True, type='primary',
+        disabled=(len(selected_strategy_names) == 0),
+        key='bt_run',
+    )
 
 
-# ============ 執行回測（按鈕在側邊欄） ============
+# ============ 執行回測（按鈕在主畫面） ============
 if run_backtest_btn:
     df_full = df_60 if bt_interval == '60m' else df_30
     if df_full.empty:
@@ -834,8 +779,8 @@ def make_backtest_chart(df_bt: pd.DataFrame, results: list, meta: dict) -> go.Fi
         x=df_bt['datetime'],
         open=df_bt['open'], high=df_bt['high'],
         low=df_bt['low'], close=df_bt['close'],
-        increasing_line_color='#C0392B', decreasing_line_color='#1660AB',
-        increasing_fillcolor='#C0392B', decreasing_fillcolor='#1660AB',
+        increasing_line_color='#D32F2F', decreasing_line_color='#00A651',
+        increasing_fillcolor='#D32F2F', decreasing_fillcolor='#00A651',
         name='K 線價格',
         showlegend=True,
     ))
