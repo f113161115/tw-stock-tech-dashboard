@@ -447,40 +447,48 @@ def make_line_chart(df: pd.DataFrame, title: str) -> go.Figure:
 
 
 def make_candle_chart(df: pd.DataFrame, title: str) -> go.Figure:
-    """建立 K 線圖（台股標準：紅漲綠跌、實心 K 棒）。"""
+    """建立 K 線圖（台股標準：紅漲綠跌、實心 K 棒）。
+    強制設定 X/Y 軸範圍，避免 plotly autorange bug 把座標軸拉爆。"""
     fig = go.Figure(data=[go.Candlestick(
         x=df['datetime'],
-        open=df['open'],
-        high=df['high'],
-        low=df['low'],
-        close=df['close'],
+        open=df['open'], high=df['high'],
+        low=df['low'], close=df['close'],
         increasing_line_color='#D32F2F',     # 紅 K（台股慣例：紅 = 漲）
         increasing_fillcolor='#D32F2F',
-        decreasing_line_color='#00A651',     # 綠 K（台股慣例：綠 = 跌）
+        decreasing_line_color='#00A651',     # 綠 K（綠 = 跌）
         decreasing_fillcolor='#00A651',
         line=dict(width=1),
-        name='K 線'
+        name='K 線',
     )])
+
+    # 強制 Y 軸範圍：用 OHLC 真實 min/max 加 5% padding
+    y_min = float(df['low'].min())
+    y_max = float(df['high'].max())
+    y_pad = (y_max - y_min) * 0.05 if y_max > y_min else 1.0
+
+    # 強制 X 軸範圍：用資料的時間 min/max（不讓 plotly 自動加 weekend padding）
+    x_min = df['datetime'].min()
+    x_max = df['datetime'].max()
+
     fig.update_layout(
         title=dict(text=title, font=dict(color='#1660AB', size=16)),
         xaxis_title='時間',
         yaxis_title='股價（元）',
         plot_bgcolor='#FDFAF0',
         paper_bgcolor='#FFFFFF',
-        height=420,
+        height=480,
         margin=dict(l=40, r=20, t=50, b=40),
         xaxis_rangeslider_visible=False,
-        font=dict(color='#2C3E50'),
+        font=dict(family='Microsoft JhengHei, PingFang TC, sans-serif', color='#2C3E50'),
     )
     fig.update_xaxes(
-        showgrid=True,
-        gridcolor='rgba(22, 96, 171, 0.08)',
-        linecolor='#4A8BC9',
+        range=[x_min, x_max],                     # 強制 X 範圍
+        showgrid=True, gridcolor='rgba(22, 96, 171, 0.08)', linecolor='#4A8BC9',
+        rangebreaks=[dict(bounds=['sat', 'mon'])],  # 跳過週末空檔
     )
     fig.update_yaxes(
-        showgrid=True,
-        gridcolor='rgba(22, 96, 171, 0.08)',
-        linecolor='#4A8BC9',
+        range=[y_min - y_pad, y_max + y_pad],     # 強制 Y 範圍
+        showgrid=True, gridcolor='rgba(22, 96, 171, 0.08)', linecolor='#4A8BC9',
     )
     return fig
 
@@ -506,36 +514,42 @@ def render_price_metric(df: pd.DataFrame) -> None:
 render_price_metric(df_30)
 
 
-# ============ 看盤區：上 K 線、下 OHLC 表（垂直堆疊） ============
+# ============ 看盤區：左 K 線、右 OHLC 表（並列） ============
 
-# ---- 上方：K 線圖（30m，看盤主圖） ----
-st.subheader('🕯️ K 線圖（30 分鐘）')
+# 共用日期挑選器（兩邊用同一個區間）
 if df_30.empty:
     st.warning('沒有 30 分鐘資料可顯示')
+    candle_start = None
 else:
     _min30, _max30 = df_30['datetime'].min().date(), df_30['datetime'].max().date()
     _def30 = max(_min30, _max30 - timedelta(days=50))
     candle_start = st.date_input(
-        '挑選起始日期（往後顯示 50 天）',
+        '🗓 挑選起始日期（往後顯示 50 天）',
         value=_def30, min_value=_min30, max_value=_max30,
         key='candle_start_date',
     )
-    df_candle = filter_50_days(df_30, candle_start)
-    if df_candle.empty:
-        st.info('此區間沒有資料')
-    else:
-        fig_k = make_candle_chart(
-            df_candle,
-            f'{symbol} K 線（{candle_start} ~ {candle_start + timedelta(days=50)}）',
-        )
-        st.plotly_chart(fig_k, use_container_width=True)
-        st.caption(f'共 {len(df_candle)} 筆 K 棒')
 
-# ---- 下方：OHLC 表格（30m，含成交量），預設摺疊 ----
-with st.expander('📋 OHLC 資料表（30 分鐘）', expanded=False):
-    if df_30.empty:
-        st.warning('沒有 30 分鐘資料可顯示')
-    else:
+look_left, look_right = st.columns([3, 2])
+
+# ---- 左：K 線圖 ----
+with look_left:
+    st.markdown('#### 🕯️ K 線圖（30 分鐘）')
+    if not df_30.empty and candle_start is not None:
+        df_candle = filter_50_days(df_30, candle_start)
+        if df_candle.empty:
+            st.info('此區間沒有資料')
+        else:
+            fig_k = make_candle_chart(
+                df_candle,
+                f'{symbol}　{candle_start} ~ {candle_start + timedelta(days=50)}',
+            )
+            st.plotly_chart(fig_k, use_container_width=True)
+            st.caption(f'共 {len(df_candle)} 筆 K 棒　·　紅 = 漲、綠 = 跌')
+
+# ---- 右：OHLC 資料表（含成交量） ----
+with look_right:
+    st.markdown('#### 📋 開高低收 + 成交量')
+    if not df_30.empty and candle_start is not None:
         df_ohlc = filter_50_days(df_30, candle_start)
         if df_ohlc.empty:
             st.info('此區間沒有資料')
@@ -543,14 +557,14 @@ with st.expander('📋 OHLC 資料表（30 分鐘）', expanded=False):
             tbl = pd.DataFrame({
                 '日期':   df_ohlc['datetime'].dt.date,
                 '時間':   df_ohlc['datetime'].dt.strftime('%H:%M'),
-                '開盤價': df_ohlc['open'].round(2),
-                '最高價': df_ohlc['high'].round(2),
-                '最低價': df_ohlc['low'].round(2),
-                '收盤價': df_ohlc['close'].round(2),
+                '開':     df_ohlc['open'].round(2),
+                '高':     df_ohlc['high'].round(2),
+                '低':     df_ohlc['low'].round(2),
+                '收':     df_ohlc['close'].round(2),
                 '成交量': df_ohlc['volume'].astype('int64'),
             }).iloc[::-1].reset_index(drop=True)
-            st.dataframe(tbl, use_container_width=True, height=400, hide_index=True)
-            st.caption(f'共 {len(tbl)} 筆 K 棒（最新在最上方）　·　下載請至下方「📥 下載資料」區')
+            st.dataframe(tbl, use_container_width=True, height=480, hide_index=True)
+            st.caption(f'共 {len(tbl)} 筆（最新在最上方）')
 
 # ============ 📥 下載資料區（30m / 60m × CSV / Excel） ============
 
@@ -805,6 +819,11 @@ def make_backtest_chart(df_bt: pd.DataFrame, results: list, meta: dict) -> go.Fi
             hovertemplate='出場 %{x}<br>價格 %{y:.2f}<extra></extra>',
         ))
 
+    # 強制軸範圍，避免 plotly autorange bug
+    y_min = float(df_bt['low'].min())
+    y_max = float(df_bt['high'].max())
+    y_pad = (y_max - y_min) * 0.05 if y_max > y_min else 1.0
+
     fig.update_layout(
         title=dict(
             text=f'{meta["symbol"]} 回測買賣訊號（{meta["interval"]}）　·　停損 {meta["stop_loss_pct"]}%　停利 {meta["take_profit_pct"]}%',
@@ -820,8 +839,15 @@ def make_backtest_chart(df_bt: pd.DataFrame, results: list, meta: dict) -> go.Fi
         font=dict(family='Microsoft JhengHei, PingFang TC, sans-serif', color='#2C3E50'),
         legend=dict(orientation='h', y=-0.15),
     )
-    fig.update_xaxes(showgrid=True, gridcolor='rgba(22, 96, 171, 0.08)', linecolor='#4A8BC9')
-    fig.update_yaxes(showgrid=True, gridcolor='rgba(22, 96, 171, 0.08)', linecolor='#4A8BC9')
+    fig.update_xaxes(
+        range=[df_bt['datetime'].min(), df_bt['datetime'].max()],
+        showgrid=True, gridcolor='rgba(22, 96, 171, 0.08)', linecolor='#4A8BC9',
+        rangebreaks=[dict(bounds=['sat', 'mon'])],
+    )
+    fig.update_yaxes(
+        range=[y_min - y_pad, y_max + y_pad],
+        showgrid=True, gridcolor='rgba(22, 96, 171, 0.08)', linecolor='#4A8BC9',
+    )
     return fig
 
 
