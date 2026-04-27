@@ -129,6 +129,48 @@ st.title('📊 台股技術分析儀表板')
 st.caption('資料來源：Yahoo Finance（透過 yfinance API）  ·  支援 30 分鐘 / 60 分鐘 K 棒')
 
 
+# ============ 資料範圍提示區（用今天日期當基準舉例） ============
+def render_data_range_banner():
+    """主畫面上方顯眼說明：目前可回測範圍、今天日期、Yahoo 限制。"""
+    today = datetime.now().date()
+    df_30 = st.session_state.get('data_30m', pd.DataFrame())
+    df_60 = st.session_state.get('data_60m', pd.DataFrame())
+
+    if df_30.empty and df_60.empty:
+        st.info(f'📅 今天是 **{today}**，請先在側邊欄抓取資料。')
+        return
+
+    info_30 = (
+        f"{df_30['datetime'].min().date()} ~ {df_30['datetime'].max().date()}　"
+        f"(共 {(df_30['datetime'].max().date() - df_30['datetime'].min().date()).days} 天，"
+        f"{len(df_30):,} 筆)"
+        if not df_30.empty else '— 尚未抓取 —'
+    )
+    info_60 = (
+        f"{df_60['datetime'].min().date()} ~ {df_60['datetime'].max().date()}　"
+        f"(共 {(df_60['datetime'].max().date() - df_60['datetime'].min().date()).days} 天，"
+        f"{len(df_60):,} 筆)"
+        if not df_60.empty else '— 尚未抓取 —'
+    )
+
+    # 用今天日期推算「Yahoo 規則允許的最大可回溯」
+    max_30_start = today - timedelta(days=60)
+    max_60_start = today - timedelta(days=730)
+
+    st.info(
+        f"📅 **今天**：{today}　·　"
+        f"請在 **側邊欄 ➡** 設定要回測的日期範圍（已自動帶入最大可選範圍、必填）\n\n"
+        f"**目前資料可回測範圍（Yahoo 限制）：**\n"
+        f"- ⏱ **30 分鐘 K**：{info_30}　│ 上限 60 天，最早 {max_30_start}\n"
+        f"- 📈 **60 分鐘 K**：{info_60}　│ 上限 730 天（~2 年），最早 {max_60_start}\n\n"
+        f"💡 想回測「今年到現在」就把起始日改 {today.replace(month=1, day=1)}；"
+        f"想回測「過去 1 個月」就改 {today - timedelta(days=30)}。"
+    )
+
+
+# render_data_range_banner() 在「取得 df_30/df_60」之後才呼叫（見下方）
+
+
 # ============ Session State 初始化 ============
 if 'data_30m' not in st.session_state:
     st.session_state.data_30m = pd.DataFrame()
@@ -277,38 +319,60 @@ with st.sidebar:
     if not _df_for_range.empty:
         _avail_min = _df_for_range['datetime'].min().date()
         _avail_max = _df_for_range['datetime'].max().date()
+
+        # 顯眼提示「可選範圍 + 預設帶入最大」
+        st.caption(
+            f'📌 **可選範圍**：{_avail_min} ~ {_avail_max}　'
+            f'(共 {(_avail_max - _avail_min).days} 天)　·　已預設帶入最大區間'
+        )
+
         col_bs, col_be = st.columns(2)
         with col_bs:
             bt_start_date = st.date_input(
-                '回測起始日',
+                '回測起始日 *（必填）',
                 value=_avail_min,
                 min_value=_avail_min,
                 max_value=_avail_max,
                 key='bt_start_date',
+                help=f'可選範圍：{_avail_min} ~ {_avail_max}',
             )
         with col_be:
             bt_end_date = st.date_input(
-                '回測結束日',
+                '回測結束日 *（必填）',
                 value=_avail_max,
                 min_value=_avail_min,
                 max_value=_avail_max,
                 key='bt_end_date',
+                help=f'可選範圍：{_avail_min} ~ {_avail_max}',
             )
-        st.caption(
-            f'⏱ 回測期間：{bt_start_date} ~ {bt_end_date}　'
-            f'（{(bt_end_date - bt_start_date).days} 天）'
-        )
+
+        # 雙保險：超出範圍/邏輯錯誤的警告
+        if bt_start_date < _avail_min or bt_end_date > _avail_max:
+            st.error(
+                f'⚠ 你選的日期超出可用範圍！\n\n'
+                f'可選：{_avail_min} ~ {_avail_max}'
+            )
+        elif bt_start_date > bt_end_date:
+            st.error(f'⚠ 起始日（{bt_start_date}）不可晚於結束日（{bt_end_date}）')
+        else:
+            st.caption(
+                f'⏱ **目前回測期間**：{bt_start_date} ~ {bt_end_date}　'
+                f'(共 **{(bt_end_date - bt_start_date).days}** 天)'
+            )
     else:
         bt_start_date = None
         bt_end_date = None
-        st.warning(f'尚未抓取 {bt_interval} 資料，無法設定回測期間')
+        st.warning(f'⚠ 尚未抓取 {bt_interval} 資料，無法設定回測期間。請先在側邊欄上方挑一檔股票。')
 
     selected_strategy_names = st.multiselect(
-        '策略（可多選比較）',
+        '策略 *（必填，可多選比較）',
         options=list(STRATEGIES.keys()),
         default=['① 均線突破 (MA20)', '② RSI + 趨勢濾網 (MA60)'],
+        help='至少選 1 個策略才能執行回測',
         key='bt_strategies',
     )
+    if not selected_strategy_names:
+        st.warning('⚠ 請至少選擇 1 個策略')
 
     col_sl, col_tp = st.columns(2)
     with col_sl:
@@ -338,17 +402,20 @@ with st.sidebar:
     with st.expander('📖 常見券商手續費（自行抄到下方）', expanded=False):
         st.markdown(
             """
-            | 方案 | 折扣 | 費率 |
+            > 📅 **資料時效：2026 年底**　·　實際以各券商最新公告為準
+
+            | 券商 / 方案 | 折扣 | 費率 |
             |---|---|---|
-            | 法定原價 | 1 折以下不可 | **0.1425%** |
-            | 元大 / 永豐 一般電子單 | 6 折 | **0.0855%** |
-            | 多家券商 VIP 5 折 | 5 折 | **0.0713%** |
-            | 多家券商熟客 4 折 | 4 折 | **0.0570%** |
-            | **國泰證券 電子單 2.8 折** ⭐ | **2.8 折** | **0.0399%** |
-            | 部分券商 1.68 折 | 1.68 折 | **0.0239%** |
+            | 法定原價 | ─ | **0.1425%** |
+            | 元大 / 一般電子單 | 6 折 | **0.0855%** |
+            | 多家券商 VIP | 5 折 | **0.0713%** |
+            | 多家券商熟客 | 4 折 | **0.0570%** |
+            | **國泰證券 電子單** ⭐ | **2.8 折** | **0.0399%** |
+            | **永豐證券 電子單** ⭐ | **2 折** | **0.0285%** |
+            | 部分券商最低 | 1.68 折 | **0.0239%** |
 
             > 計算方式：`法定 0.1425% × 折扣` ；下限多為 NT\\$ 20
-            > 看你實際用哪家券商，把對應費率填到下方欄位即可。
+            > 把對應費率抄到下方欄位即可。
             """
         )
 
@@ -395,6 +462,10 @@ if not st.session_state.loaded:
 df_30 = st.session_state.data_30m
 df_60 = st.session_state.data_60m
 symbol = st.session_state.symbol
+
+
+# ============ 在主畫面最上方顯示資料範圍提示（在資料抓完後才顯示，否則資訊不完整） ============
+render_data_range_banner()
 
 
 # ============ 圖表繪製函式 ============
