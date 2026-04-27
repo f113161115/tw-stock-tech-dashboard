@@ -171,6 +171,36 @@ def render_data_range_banner():
 # render_data_range_banner() 在「取得 df_30/df_60」之後才呼叫（見下方）
 
 
+# ============ 台股代碼 → 公司名 對照表（給 UI 顯示用） ============
+STOCK_NAMES = {
+    '0050.TW': '元大台灣50',     '0056.TW': '元大高股息',
+    '00878.TW': '國泰永續高股息', '00919.TW': '群益台灣精選高息',
+    '1101.TW': '台泥',           '1102.TW': '亞泥',
+    '1216.TW': '統一',           '1301.TW': '台塑',
+    '1303.TW': '南亞',           '1326.TW': '台化',
+    '1402.TW': '遠東新',         '1718.TW': '中纖',
+    '1802.TW': '台玻',           '2002.TW': '中鋼',
+    '2105.TW': '正新',           '2207.TW': '和泰車',
+    '2303.TW': '聯電',           '2317.TW': '鴻海',
+    '2330.TW': '台積電',         '2382.TW': '廣達',
+    '2412.TW': '中華電',         '2454.TW': '聯發科',
+    '2603.TW': '長榮',           '2609.TW': '陽明',
+    '2615.TW': '萬海',           '2880.TW': '華南金',
+    '2881.TW': '富邦金',         '2882.TW': '國泰金',
+    '2884.TW': '玉山金',         '2886.TW': '兆豐金',
+    '2891.TW': '中信金',         '2892.TW': '第一金',
+    '3008.TW': '大立光',         '3034.TW': '聯詠',
+    '3231.TW': '緯創',           '3711.TW': '日月光投控',
+    '4904.TW': '遠傳',           '5871.TW': '中租-KY',
+    '6505.TW': '台塑化',         '6669.TW': '緯穎',
+}
+
+def get_stock_display(symbol: str) -> str:
+    """回傳「1802.TW 台玻」這種顯示文字；找不到名字就只顯示代碼。"""
+    name = STOCK_NAMES.get(symbol.upper().strip(), '')
+    return f'{symbol} {name}' if name else symbol
+
+
 # ============ Session State 初始化 ============
 if 'data_30m' not in st.session_state:
     st.session_state.data_30m = pd.DataFrame()
@@ -278,6 +308,21 @@ QUICK_PICKS = [
 ]
 
 with st.sidebar:
+    # ---- 第 1 區：股票代碼輸入（最上方） ----
+    st.markdown('### 🔍 股票代碼 *（必填）')
+    sb_new_symbol = st.text_input(
+        '輸入代碼（台股加 .TW）',
+        value=st.session_state.get('symbol', '1802.TW'),
+        help='例如 1802.TW、2330.TW、0050.TW',
+        key='sb_symbol_input',
+    )
+    if st.button('🔄 抓取此代碼', use_container_width=True, type='primary',
+                 key='sb_refresh_btn'):
+        if load_stock(sb_new_symbol):
+            st.rerun()
+
+    st.markdown('---')
+    # ---- 第 2 區：快速挑 ----
     st.markdown('### 🚀 快速挑')
     st.caption('點一下即抓取')
     for code, name in QUICK_PICKS:
@@ -464,7 +509,69 @@ df_60 = st.session_state.data_60m
 symbol = st.session_state.symbol
 
 
-# ============ 在主畫面最上方顯示資料範圍提示（在資料抓完後才顯示，否則資訊不完整） ============
+# ============ 主畫面最上方：目前選擇 + 股票代碼輸入 + Step 引導 ============
+def render_top_bar():
+    """主畫面最上方：股票代碼輸入 + 目前選擇 + Step 進度。"""
+    # 「目前選擇」橫條
+    display = get_stock_display(symbol)
+    name_only = STOCK_NAMES.get(symbol, '')
+    if name_only:
+        st.markdown(
+            f'<div style="background:#1660AB;color:#F9F2E0;padding:14px 22px;'
+            f'border-radius:10px;margin-bottom:14px;font-size:1.05rem;'
+            f'letter-spacing:1px;box-shadow:0 2px 10px rgba(22,96,171,0.2);">'
+            f'📊 <b>目前選擇：</b><span style="font-size:1.25rem;letter-spacing:2px;">'
+            f'{symbol}</span>　·　<b>{name_only}</b></div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f'<div style="background:#1660AB;color:#F9F2E0;padding:14px 22px;'
+            f'border-radius:10px;margin-bottom:14px;font-size:1.05rem;'
+            f'letter-spacing:1px;box-shadow:0 2px 10px rgba(22,96,171,0.2);">'
+            f'📊 <b>目前選擇：</b><span style="font-size:1.25rem;letter-spacing:2px;">'
+            f'{symbol}</span>　<i style="opacity:0.7;font-size:0.9rem;">'
+            f'（公司中文名未登錄，可在 app.py 的 STOCK_NAMES 補上）</i></div>',
+            unsafe_allow_html=True,
+        )
+
+    # 股票代碼輸入欄（主畫面版）
+    col_in, col_btn = st.columns([4, 1])
+    with col_in:
+        new_sym_top = st.text_input(
+            '🔄 換一檔股票（台股請加 .TW）*（必填）',
+            value=symbol,
+            help='例：1802.TW 台玻、2330.TW 台積電、0050.TW 元大台灣50',
+            key='top_symbol_input',
+        )
+    with col_btn:
+        st.write('')
+        st.write('')
+        refresh_top = st.button('🔄 重新抓取', use_container_width=True, type='primary',
+                                key='top_refresh_btn')
+    if refresh_top:
+        if load_stock(new_sym_top):
+            st.success(f'✓ 已切換到 {get_stock_display(new_sym_top)}')
+            st.rerun()
+
+    # Step 進度引導
+    has_data = not (df_30.empty and df_60.empty)
+    has_results = bool(st.session_state.bt_results)
+    s1 = '✅' if has_data else '⬜'
+    s2 = '✅' if has_results else ('▶' if has_data else '⬜')
+    s3 = '✅' if has_results else '⬜'
+    st.caption(
+        f'**操作流程**：&nbsp;&nbsp;'
+        f'{s1} **Step 1** 選股票（最上面 / 側邊欄）&nbsp;&nbsp;→&nbsp;&nbsp;'
+        f'{s2} **Step 2** 側邊欄設定回測（期間/策略/停損/手續費）→ 按「執行回測」&nbsp;&nbsp;→&nbsp;&nbsp;'
+        f'{s3} **Step 3** 看結果（可點左上 « 收起側邊欄看大圖）'
+    )
+
+
+render_top_bar()
+
+
+# ============ 在主畫面顯示資料範圍提示 ============
 render_data_range_banner()
 
 
@@ -676,28 +783,6 @@ with col_right:
             use_container_width=True,
             key='dl_60m_main',
         )
-
-
-# ============ 下方：股票代碼輸入欄 ============
-st.markdown('---')
-st.subheader('🔍 股票代碼')
-
-col_input, col_btn = st.columns([4, 1])
-with col_input:
-    new_symbol = st.text_input(
-        '輸入股票代碼（台股請加 .TW，例如 1802.TW 台玻、2330.TW 台積電、2317.TW 鴻海）',
-        value=symbol,
-        key='symbol_input'
-    )
-with col_btn:
-    st.write('')
-    st.write('')
-    refresh = st.button('🔄 重新抓取', use_container_width=True, type='primary')
-
-if refresh:
-    if load_stock(new_symbol):
-        st.success(f'✓ 已更新為 {new_symbol.upper().strip()}')
-        st.rerun()
 
 
 # ============ 執行回測（按鈕在側邊欄） ============
