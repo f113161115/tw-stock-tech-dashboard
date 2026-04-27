@@ -15,10 +15,16 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import timedelta
+from io import BytesIO
 
 from scraper import (
-    fetch_stock_data, save_data,
+    fetch_stock_data, save_data, export_to_excel,
     ERR_NETWORK, ERR_RATE_LIMIT, ERR_INVALID, ERR_PARTIAL, ERR_OTHER,
+)
+from strategies import STRATEGIES
+from backtest import (
+    run_multi_strategy, kpi_table, BacktestResult,
+    DEFAULT_INITIAL_CAPITAL, DEFAULT_COMMISSION,
 )
 
 
@@ -131,6 +137,10 @@ if 'symbol' not in st.session_state:
     st.session_state.symbol = '1802.TW'
 if 'loaded' not in st.session_state:
     st.session_state.loaded = False
+if 'bt_results' not in st.session_state:
+    st.session_state.bt_results = []          # List[BacktestResult]
+if 'bt_meta' not in st.session_state:
+    st.session_state.bt_meta = {}             # 跑回測時用的設定（給檔名等）
 
 
 # ============ 抓資料的函式 ============
@@ -244,10 +254,65 @@ with st.sidebar:
             - 1 日：可抓全歷史
 
             這是 Yahoo 平台規則，不是程式問題。
-            抓到的資料會自動存到 `data/` 資料夾，
-            未來給機器學習與回測使用。
+            抓到的資料會自動存到 `data/` 資料夾（CSV）
+            與 `output/` 資料夾（Excel），
+            供回測與報告使用。
             """
         )
+
+    st.markdown('---')
+    st.markdown('### 📊 策略回測')
+
+    bt_interval = st.radio(
+        '回測週期',
+        options=['60m', '30m'],
+        horizontal=True,
+        help='60m 資料較長（~2 年）；30m 較細但只 60 天',
+        key='bt_interval',
+    )
+
+    selected_strategy_names = st.multiselect(
+        '策略（可多選比較）',
+        options=list(STRATEGIES.keys()),
+        default=['① 均線突破 (MA20)', '② RSI + 趨勢濾網 (MA60)'],
+        key='bt_strategies',
+    )
+
+    col_sl, col_tp = st.columns(2)
+    with col_sl:
+        bt_stop_loss = st.number_input(
+            '停損 %',
+            min_value=0.0, max_value=50.0, value=5.0, step=0.5,
+            help='0 = 不啟用。例如 5 代表虧損 5% 強制平倉',
+            key='bt_sl',
+        )
+    with col_tp:
+        bt_take_profit = st.number_input(
+            '停利 %',
+            min_value=0.0, max_value=200.0, value=10.0, step=1.0,
+            help='0 = 不啟用。例如 10 代表獲利 10% 落袋',
+            key='bt_tp',
+        )
+
+    bt_capital = st.number_input(
+        '初始資金 (NT$)',
+        min_value=10000, max_value=100_000_000, value=DEFAULT_INITIAL_CAPITAL,
+        step=100000, format='%d',
+        key='bt_capital',
+    )
+    bt_commission = st.number_input(
+        '每筆手續費 (NT$)',
+        min_value=0, max_value=1000, value=DEFAULT_COMMISSION, step=5,
+        key='bt_commission',
+    )
+
+    run_backtest_btn = st.button(
+        '▶ 執行回測',
+        use_container_width=True,
+        type='primary',
+        disabled=(len(selected_strategy_names) == 0),
+        key='bt_run',
+    )
 
 
 # ============ 首次進入自動抓 1802.TW ============
@@ -483,6 +548,210 @@ if refresh:
     if load_stock(new_symbol):
         st.success(f'✓ 已更新為 {new_symbol.upper().strip()}')
         st.rerun()
+
+
+# ============ 執行回測（按鈕在側邊欄） ============
+if run_backtest_btn:
+    df_bt = df_60 if bt_interval == '60m' else df_30
+    if df_bt.empty:
+        st.error(f'❌ 沒有 {bt_interval} 資料，無法回測')
+    else:
+        chosen = {n: STRATEGIES[n] for n in selected_strategy_names}
+        with st.spinner(f'回測 {len(chosen)} 個策略中...'):
+            bt_results = run_multi_strategy(
+                df              = df_bt,
+                strategy_funcs  = chosen,
+                initial_capital = float(bt_capital),
+                commission      = float(bt_commission),
+                stop_loss_pct   = float(bt_stop_loss),
+                take_profit_pct = float(bt_take_profit),
+                interval        = bt_interval,
+            )
+        st.session_state.bt_results = bt_results
+        st.session_state.bt_meta = {
+            'symbol':          symbol,
+            'interval':        bt_interval,
+            'capital':         bt_capital,
+            'commission':      bt_commission,
+            'stop_loss_pct':   bt_stop_loss,
+            'take_profit_pct': bt_take_profit,
+            'df':              df_bt,
+        }
+        st.success(f'✓ 回測完成（{symbol} · {bt_interval} · {len(bt_results)} 個策略）')
+
+
+# ============ 回測結果區（左：圖、右：KPI 表格） ============
+def make_backtest_chart(df_bt: pd.DataFrame, results: list, meta: dict) -> go.Figure:
+    """K 線圖 + 各策略買賣標記 + 權益曲線（雙 y 軸）。標題用英文避免 PNG 亂碼。"""
+    fig = go.Figure()
+    fig.add_trace(go.Candlestick(
+        x=df_bt['datetime'],
+        open=df_bt['open'], high=df_bt['high'],
+        low=df_bt['low'], close=df_bt['close'],
+        increasing_line_color='#C0392B', decreasing_line_color='#1660AB',
+        increasing_fillcolor='#C0392B', decreasing_fillcolor='#1660AB',
+        name='Price (K-line)',
+        showlegend=True,
+    ))
+
+    palette = ['#E67E22', '#27AE60', '#8E44AD', '#16A085', '#D35400', '#2980B9']
+    for i, r in enumerate(results):
+        color = palette[i % len(palette)]
+        # 進場箭頭 / 出場箭頭
+        entry_x = [t.entry_time for t in r.trades]
+        entry_y = [t.entry_price for t in r.trades]
+        exit_x  = [t.exit_time for t in r.trades]
+        exit_y  = [t.exit_price for t in r.trades]
+        fig.add_trace(go.Scatter(
+            x=entry_x, y=entry_y, mode='markers',
+            marker=dict(symbol='triangle-up', size=10, color=color),
+            name=f'{r.strategy_name} BUY',
+            hovertemplate='ENTRY %{x}<br>%{y:.2f}<extra></extra>',
+        ))
+        fig.add_trace(go.Scatter(
+            x=exit_x, y=exit_y, mode='markers',
+            marker=dict(symbol='triangle-down', size=10, color=color, line=dict(width=1, color='#000')),
+            name=f'{r.strategy_name} SELL',
+            hovertemplate='EXIT %{x}<br>%{y:.2f}<extra></extra>',
+        ))
+
+    fig.update_layout(
+        # 全英文標題：plotly to_image (PNG) 在 Linux/雲端容器無中文字體時不會亂碼
+        title=dict(
+            text=f'{meta["symbol"]} Backtest ({meta["interval"]}) | SL {meta["stop_loss_pct"]}% TP {meta["take_profit_pct"]}%',
+            font=dict(color='#1660AB', size=16),
+        ),
+        xaxis_title='Time',
+        yaxis_title='Price (NTD)',
+        plot_bgcolor='#FDFAF0',
+        paper_bgcolor='#FFFFFF',
+        height=500,
+        margin=dict(l=40, r=20, t=60, b=40),
+        xaxis_rangeslider_visible=False,
+        font=dict(color='#2C3E50'),
+        legend=dict(orientation='h', y=-0.15),
+    )
+    fig.update_xaxes(showgrid=True, gridcolor='rgba(22, 96, 171, 0.08)', linecolor='#4A8BC9')
+    fig.update_yaxes(showgrid=True, gridcolor='rgba(22, 96, 171, 0.08)', linecolor='#4A8BC9')
+    return fig
+
+
+def make_equity_chart(results: list) -> go.Figure:
+    """各策略權益曲線疊圖。"""
+    fig = go.Figure()
+    palette = ['#E67E22', '#27AE60', '#8E44AD', '#16A085', '#D35400', '#2980B9']
+    for i, r in enumerate(results):
+        if r.equity_curve.empty:
+            continue
+        fig.add_trace(go.Scatter(
+            x=r.equity_curve.index, y=r.equity_curve.values,
+            mode='lines', name=r.strategy_name,
+            line=dict(width=2, color=palette[i % len(palette)]),
+            hovertemplate='%{x}<br>NT$ %{y:,.0f}<extra></extra>',
+        ))
+    fig.update_layout(
+        title=dict(text='Equity Curves', font=dict(color='#1660AB', size=14)),
+        xaxis_title='Time', yaxis_title='Equity (NTD)',
+        plot_bgcolor='#FDFAF0', paper_bgcolor='#FFFFFF',
+        height=300, margin=dict(l=40, r=20, t=40, b=40),
+        font=dict(color='#2C3E50'),
+        legend=dict(orientation='h', y=-0.2),
+    )
+    fig.update_xaxes(showgrid=True, gridcolor='rgba(22, 96, 171, 0.08)')
+    fig.update_yaxes(showgrid=True, gridcolor='rgba(22, 96, 171, 0.08)')
+    return fig
+
+
+def build_excel_bytes(results: list, meta: dict) -> bytes:
+    """把 KPI + 各策略的交易明細 + 原始 OHLCV 包成一個 Excel 檔。"""
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine='openpyxl') as writer:
+        # Sheet 1: KPI 摘要
+        kpi_df = kpi_table(results)
+        kpi_df.to_excel(writer, sheet_name='KPI_Summary')
+
+        # Sheet 2: 設定
+        meta_show = {k: v for k, v in meta.items() if k != 'df'}
+        pd.DataFrame.from_dict(meta_show, orient='index', columns=['value']).to_excel(
+            writer, sheet_name='Settings'
+        )
+
+        # Sheet 3+: 各策略交易明細
+        for r in results:
+            if not r.trades:
+                continue
+            trades_df = pd.DataFrame([{
+                '進場時間': t.entry_time, '進場價': t.entry_price,
+                '出場時間': t.exit_time, '出場價': t.exit_price,
+                '張數(股)': t.shares, '損益(NT$)': t.pnl,
+                '報酬%': t.return_pct, '手續費': t.commission,
+                '出場原因': t.exit_reason,
+            } for t in r.trades])
+            # Excel 工作表名長度 ≤ 31 字
+            sheet = ('TR_' + r.strategy_name)[:31]
+            trades_df.to_excel(writer, sheet_name=sheet, index=False)
+
+        # Sheet 末: 原始 OHLCV
+        meta['df'].to_excel(writer, sheet_name='OHLCV', index=False)
+    return buf.getvalue()
+
+
+bt_results = st.session_state.bt_results
+bt_meta = st.session_state.bt_meta
+
+if bt_results:
+    st.markdown('---')
+    st.subheader('📊 策略回測結果')
+
+    bt_left, bt_right = st.columns([3, 2])
+
+    # ---- 左：K 線 + 買賣訊號 + 權益曲線 ----
+    with bt_left:
+        chart_fig = make_backtest_chart(bt_meta['df'], bt_results, bt_meta)
+        st.plotly_chart(chart_fig, use_container_width=True)
+
+        equity_fig = make_equity_chart(bt_results)
+        st.plotly_chart(equity_fig, use_container_width=True)
+
+        # PNG 下載（K 線圖）
+        try:
+            png_bytes = chart_fig.to_image(format='png', width=1400, height=700, scale=2)
+            st.download_button(
+                '⬇ 下載 K 線回測圖 (PNG)',
+                png_bytes,
+                file_name=f'{bt_meta["symbol"].replace(".", "_")}_backtest_{bt_meta["interval"]}.png',
+                mime='image/png',
+                use_container_width=True,
+                key='dl_bt_png',
+            )
+        except Exception as e:
+            st.info(f'PNG 匯出需要 kaleido 套件（若未安裝請在 requirements.txt 加 kaleido）。錯誤：{e}')
+
+    # ---- 右下角：KPI 表格 + Excel 下載 ----
+    with bt_right:
+        st.markdown('#### 📋 KPI 績效表')
+        kpi_df = kpi_table(bt_results)
+        st.dataframe(kpi_df, use_container_width=True, height=520)
+
+        # Excel 下載
+        try:
+            xlsx_bytes = build_excel_bytes(bt_results, bt_meta)
+            st.download_button(
+                '⬇ 下載完整回測報告 (Excel)',
+                xlsx_bytes,
+                file_name=f'{bt_meta["symbol"].replace(".", "_")}_backtest_{bt_meta["interval"]}.xlsx',
+                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                use_container_width=True,
+                key='dl_bt_xlsx',
+            )
+        except Exception as e:
+            st.error(f'Excel 匯出失敗（需 openpyxl）：{e}')
+
+        st.caption(
+            f'資料：{bt_meta["symbol"]} · {bt_meta["interval"]} · '
+            f'資金 NT$ {bt_meta["capital"]:,} · 手續費 NT$ {bt_meta["commission"]} · '
+            f'停損 {bt_meta["stop_loss_pct"]}% · 停利 {bt_meta["take_profit_pct"]}%'
+        )
 
 
 # ============ 資料摘要 ============

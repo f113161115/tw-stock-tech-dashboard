@@ -171,6 +171,24 @@ def save_data(df: pd.DataFrame, symbol: str, interval: str,
     return latest_path
 
 
+def export_to_excel(df: pd.DataFrame, symbol: str, interval: str,
+                    output_dir: str = 'output') -> Optional[Path]:
+    """
+    把資料另存成 Excel (.xlsx) 到 output 資料夾，給回測 / 報告用。
+    與 save_data() 同時呼叫即可（前者存 CSV 給程式讀、這個存 XLSX 給人看）。
+
+    回傳 Path；若 df 為空則回 None。
+    """
+    if df.empty:
+        return None
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    safe_symbol = symbol.replace('.', '_')
+    today = datetime.now().strftime('%Y%m%d')
+    path = Path(output_dir) / f"{safe_symbol}_{interval}_{today}.xlsx"
+    df.to_excel(path, index=False, sheet_name=f'{interval}_OHLCV')
+    return path
+
+
 def load_cached_data(symbol: str, interval: str,
                      data_dir: str = 'data') -> pd.DataFrame:
     """
@@ -195,13 +213,15 @@ if __name__ == '__main__':
     print('=== 台玻 (1802.TW) 股價資料抓取測試 ===\n')
 
     for interval in ['30m', '60m']:
-        print(f'抓取 {interval} 資料中...')
+        print(f'[FETCH] {interval} ...')
         result = fetch_stock_data('1802.TW', interval)
         if result.error_code:
-            print(f'  ✗ [{result.error_code}] {result.error_msg}\n')
+            print(f'  [FAIL] [{result.error_code}] {result.error_msg}\n')
             continue
         df = result.df
-        path = save_data(df, '1802.TW', interval)
-        print(f'  ✓ 抓到 {len(df)} 筆資料')
-        print(f'  範圍：{df["datetime"].min()} ~ {df["datetime"].max()}')
-        print(f'  儲存路徑：{path}\n')
+        csv_path = save_data(df, '1802.TW', interval)
+        xlsx_path = export_to_excel(df, '1802.TW', interval)
+        print(f'  [OK] {len(df)} rows')
+        print(f'  range: {df["datetime"].min()} ~ {df["datetime"].max()}')
+        print(f'  CSV : {csv_path}')
+        print(f'  XLSX: {xlsx_path}\n')
