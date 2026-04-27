@@ -192,6 +192,16 @@ def strategy_mean_reversion(df: pd.DataFrame,
     return pd.Series(pos, index=df.index)
 
 
+# ============ 基準策略：Buy & Hold（買進不動） ============
+
+def strategy_buy_and_hold(df: pd.DataFrame) -> pd.Series:
+    """
+    Buy & Hold 對照基準：第一根 K 棒就買、永遠持倉、不出場。
+    用來檢驗主動策略「有沒有真的勝過買進不動」這條及格線。
+    """
+    return pd.Series(1, index=df.index)
+
+
 # ============ 策略註冊表（給 UI 用） ============
 
 STRATEGIES: Dict[str, Callable[[pd.DataFrame], pd.Series]] = {
@@ -201,6 +211,7 @@ STRATEGIES: Dict[str, Callable[[pd.DataFrame], pd.Series]] = {
     '④ 布林通道突破':             strategy_bollinger_break,
     '⑤ KD 黃金交叉':             strategy_kd_cross,
     '⑥ 動量回歸 (Mean Revert)':  strategy_mean_reversion,
+    '🅑 Buy & Hold（基準）':      strategy_buy_and_hold,
 }
 
 

@@ -16,9 +16,10 @@ import pandas as pd
 import plotly.graph_objects as go
 from datetime import timedelta, datetime
 from io import BytesIO
+from typing import Optional
 
 from scraper import (
-    fetch_stock_data, save_data, export_to_excel,
+    fetch_stock_data, save_data, export_to_excel, fetch_stock_name,
     ERR_NETWORK, ERR_RATE_LIMIT, ERR_INVALID, ERR_PARTIAL, ERR_OTHER,
 )
 from strategies import STRATEGIES
@@ -195,9 +196,18 @@ STOCK_NAMES = {
     '6505.TW': '台塑化',         '6669.TW': '緯穎',
 }
 
+@st.cache_data(show_spinner=False)
+def get_stock_name(symbol: str) -> str:
+    """中文 hardcode 優先、找不到 fallback 到 Yahoo Finance（英文 longName）。"""
+    sym = symbol.upper().strip()
+    if sym in STOCK_NAMES:
+        return STOCK_NAMES[sym]      # 例：「台玻」（中文）
+    return fetch_stock_name(sym)     # 例：「Taiwan Glass Industry Corporation」（英文）
+
+
 def get_stock_display(symbol: str) -> str:
-    """回傳「1802.TW 台玻」這種顯示文字；找不到名字就只顯示代碼。"""
-    name = STOCK_NAMES.get(symbol.upper().strip(), '')
+    """回傳「1802.TW 台玻」這種顯示文字；找不到就只顯示代碼。"""
+    name = get_stock_name(symbol)
     return f'{symbol} {name}' if name else symbol
 
 
@@ -512,9 +522,8 @@ symbol = st.session_state.symbol
 # ============ 主畫面最上方：目前選擇 + 股票代碼輸入 + Step 引導 ============
 def render_top_bar():
     """主畫面最上方：股票代碼輸入 + 目前選擇 + Step 進度。"""
-    # 「目前選擇」橫條
-    display = get_stock_display(symbol)
-    name_only = STOCK_NAMES.get(symbol, '')
+    # 「目前選擇」橫條 — 中文優先、自動回退到 Yahoo Finance 抓的英文名
+    name_only = get_stock_name(symbol)
     if name_only:
         st.markdown(
             f'<div style="background:#1660AB;color:#F9F2E0;padding:14px 22px;'
@@ -531,7 +540,7 @@ def render_top_bar():
             f'letter-spacing:1px;box-shadow:0 2px 10px rgba(22,96,171,0.2);">'
             f'📊 <b>目前選擇：</b><span style="font-size:1.25rem;letter-spacing:2px;">'
             f'{symbol}</span>　<i style="opacity:0.7;font-size:0.9rem;">'
-            f'（公司中文名未登錄，可在 app.py 的 STOCK_NAMES 補上）</i></div>',
+            f'（Yahoo Finance 也查不到此代碼的公司名）</i></div>',
             unsafe_allow_html=True,
         )
 
@@ -691,34 +700,40 @@ def render_price_metric(df: pd.DataFrame) -> None:
 render_price_metric(df_30)
 
 
-# ============ 上方兩張圖：左折線、右 K 線 ============
-col_left, col_right = st.columns(2)
+# ============ 看盤區：上 K 線、下 OHLC 表（垂直堆疊） ============
 
-# ---- 左上：折線圖（用 60 分鐘資料，因為歷史較長） ----
-# ---- 左：OHLC 表格（30m 資料，含成交量）----
-with col_left:
-    st.subheader('📋 OHLC 資料表（30 分鐘）')
+# ---- 上方：K 線圖（30m，看盤主圖） ----
+st.subheader('🕯️ K 線圖（30 分鐘）')
+if df_30.empty:
+    st.warning('沒有 30 分鐘資料可顯示')
+else:
+    _min30, _max30 = df_30['datetime'].min().date(), df_30['datetime'].max().date()
+    _def30 = max(_min30, _max30 - timedelta(days=50))
+    candle_start = st.date_input(
+        '挑選起始日期（往後顯示 50 天）',
+        value=_def30, min_value=_min30, max_value=_max30,
+        key='candle_start_date',
+    )
+    df_candle = filter_50_days(df_30, candle_start)
+    if df_candle.empty:
+        st.info('此區間沒有資料')
+    else:
+        fig_k = make_candle_chart(
+            df_candle,
+            f'{symbol} K 線（{candle_start} ~ {candle_start + timedelta(days=50)}）',
+        )
+        st.plotly_chart(fig_k, use_container_width=True)
+        st.caption(f'共 {len(df_candle)} 筆 K 棒')
 
+# ---- 下方：OHLC 表格（30m，含成交量），用 expander 包起來省空間 ----
+with st.expander('📋 OHLC 資料表（30 分鐘，點擊展開／收合）', expanded=False):
     if df_30.empty:
         st.warning('沒有 30 分鐘資料可顯示')
     else:
-        min_date = df_30['datetime'].min().date()
-        max_date = df_30['datetime'].max().date()
-        default_start = max(min_date, max_date - timedelta(days=50))
-
-        ohlc_start = st.date_input(
-            '挑選起始日期（往後顯示 50 天）',
-            value=default_start,
-            min_value=min_date,
-            max_value=max_date,
-            key='ohlc_start_date',
-        )
-
-        df_ohlc = filter_50_days(df_30, ohlc_start)
+        df_ohlc = filter_50_days(df_30, candle_start)
         if df_ohlc.empty:
             st.info('此區間沒有資料')
         else:
-            # 把 datetime 拆成「日期」「時間」兩欄、欄名中文化
             tbl = pd.DataFrame({
                 '日期':   df_ohlc['datetime'].dt.date,
                 '時間':   df_ohlc['datetime'].dt.strftime('%H:%M'),
@@ -727,10 +742,8 @@ with col_left:
                 '最低價': df_ohlc['low'].round(2),
                 '收盤價': df_ohlc['close'].round(2),
                 '成交量': df_ohlc['volume'].astype('int64'),
-            })
-            # 倒序：最新的在最上面（看盤習慣）
-            tbl = tbl.iloc[::-1].reset_index(drop=True)
-            st.dataframe(tbl, use_container_width=True, height=440, hide_index=True)
+            }).iloc[::-1].reset_index(drop=True)  # 倒序：最新在上
+            st.dataframe(tbl, use_container_width=True, height=400, hide_index=True)
             st.caption(f'共 {len(tbl)} 筆 K 棒（最新在最上方）')
 
         # 下載 30m CSV
@@ -743,38 +756,10 @@ with col_left:
             key='dl_30m_main',
         )
 
-
-# ---- 右：折線圖（60m 資料）----
-with col_right:
-    st.subheader('📈 股價折線圖（60 分鐘）')
-
-    if df_60.empty:
-        st.warning('沒有 60 分鐘資料可顯示')
-    else:
-        min_date = df_60['datetime'].min().date()
-        max_date = df_60['datetime'].max().date()
-        default_start = max(min_date, max_date - timedelta(days=50))
-
-        line_start = st.date_input(
-            '挑選起始日期（往後顯示 50 天）',
-            value=default_start,
-            min_value=min_date,
-            max_value=max_date,
-            key='line_start_date',
-        )
-
-        df_line = filter_50_days(df_60, line_start)
-        if df_line.empty:
-            st.info('此區間沒有資料')
-        else:
-            fig = make_line_chart(
-                df_line,
-                f'{symbol} 收盤價走勢（{line_start} ~ {line_start + timedelta(days=50)}）'
-            )
-            st.plotly_chart(fig, use_container_width=True)
-            st.caption(f'共 {len(df_line)} 筆 K 棒')
-
-        # 下載 60m CSV
+# ---- 60m 資料下載（保留，給回測用） ----
+if not df_60.empty:
+    with st.expander('📈 60 分鐘資料下載（給回測用）', expanded=False):
+        st.caption(f'共 {len(df_60):,} 筆 K 棒，範圍 {df_60["datetime"].min().date()} ~ {df_60["datetime"].max().date()}')
         st.download_button(
             '⬇ 下載 60 分鐘資料（CSV，完整 ~730 天）',
             df_60.to_csv(index=False).encode('utf-8-sig'),
@@ -843,7 +828,7 @@ if run_backtest_btn:
 
 # ============ 回測結果區（左：圖、右：KPI 表格） ============
 def make_backtest_chart(df_bt: pd.DataFrame, results: list, meta: dict) -> go.Figure:
-    """K 線圖 + 各策略買賣標記 + 權益曲線（雙 y 軸）。標題用英文避免 PNG 亂碼。"""
+    """K 線圖 + 各策略買賣標記。中文化（雲端 PNG export 若無中文字體可能會亂碼，本機 Windows OK）。"""
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
         x=df_bt['datetime'],
@@ -851,14 +836,13 @@ def make_backtest_chart(df_bt: pd.DataFrame, results: list, meta: dict) -> go.Fi
         low=df_bt['low'], close=df_bt['close'],
         increasing_line_color='#C0392B', decreasing_line_color='#1660AB',
         increasing_fillcolor='#C0392B', decreasing_fillcolor='#1660AB',
-        name='Price (K-line)',
+        name='K 線價格',
         showlegend=True,
     ))
 
-    palette = ['#E67E22', '#27AE60', '#8E44AD', '#16A085', '#D35400', '#2980B9']
+    palette = ['#E67E22', '#27AE60', '#8E44AD', '#16A085', '#D35400', '#2980B9', '#7F8C8D']
     for i, r in enumerate(results):
         color = palette[i % len(palette)]
-        # 進場箭頭 / 出場箭頭
         entry_x = [t.entry_time for t in r.trades]
         entry_y = [t.entry_price for t in r.trades]
         exit_x  = [t.exit_time for t in r.trades]
@@ -866,30 +850,29 @@ def make_backtest_chart(df_bt: pd.DataFrame, results: list, meta: dict) -> go.Fi
         fig.add_trace(go.Scatter(
             x=entry_x, y=entry_y, mode='markers',
             marker=dict(symbol='triangle-up', size=10, color=color),
-            name=f'{r.strategy_name} BUY',
-            hovertemplate='ENTRY %{x}<br>%{y:.2f}<extra></extra>',
+            name=f'{r.strategy_name} 買進',
+            hovertemplate='進場 %{x}<br>價格 %{y:.2f}<extra></extra>',
         ))
         fig.add_trace(go.Scatter(
             x=exit_x, y=exit_y, mode='markers',
             marker=dict(symbol='triangle-down', size=10, color=color, line=dict(width=1, color='#000')),
-            name=f'{r.strategy_name} SELL',
-            hovertemplate='EXIT %{x}<br>%{y:.2f}<extra></extra>',
+            name=f'{r.strategy_name} 賣出',
+            hovertemplate='出場 %{x}<br>價格 %{y:.2f}<extra></extra>',
         ))
 
     fig.update_layout(
-        # 全英文標題：plotly to_image (PNG) 在 Linux/雲端容器無中文字體時不會亂碼
         title=dict(
-            text=f'{meta["symbol"]} Backtest ({meta["interval"]}) | SL {meta["stop_loss_pct"]}% TP {meta["take_profit_pct"]}%',
+            text=f'{meta["symbol"]} 回測買賣訊號（{meta["interval"]}）　·　停損 {meta["stop_loss_pct"]}%　停利 {meta["take_profit_pct"]}%',
             font=dict(color='#1660AB', size=16),
         ),
-        xaxis_title='Time',
-        yaxis_title='Price (NTD)',
+        xaxis_title='時間',
+        yaxis_title='股價（元）',
         plot_bgcolor='#FDFAF0',
         paper_bgcolor='#FFFFFF',
         height=500,
         margin=dict(l=40, r=20, t=60, b=40),
         xaxis_rangeslider_visible=False,
-        font=dict(color='#2C3E50'),
+        font=dict(family='Microsoft JhengHei, PingFang TC, sans-serif', color='#2C3E50'),
         legend=dict(orientation='h', y=-0.15),
     )
     fig.update_xaxes(showgrid=True, gridcolor='rgba(22, 96, 171, 0.08)', linecolor='#4A8BC9')
@@ -900,7 +883,7 @@ def make_backtest_chart(df_bt: pd.DataFrame, results: list, meta: dict) -> go.Fi
 def make_equity_chart(results: list) -> go.Figure:
     """各策略權益曲線疊圖。"""
     fig = go.Figure()
-    palette = ['#E67E22', '#27AE60', '#8E44AD', '#16A085', '#D35400', '#2980B9']
+    palette = ['#E67E22', '#27AE60', '#8E44AD', '#16A085', '#D35400', '#2980B9', '#7F8C8D']
     for i, r in enumerate(results):
         if r.equity_curve.empty:
             continue
@@ -908,14 +891,14 @@ def make_equity_chart(results: list) -> go.Figure:
             x=r.equity_curve.index, y=r.equity_curve.values,
             mode='lines', name=r.strategy_name,
             line=dict(width=2, color=palette[i % len(palette)]),
-            hovertemplate='%{x}<br>NT$ %{y:,.0f}<extra></extra>',
+            hovertemplate='%{x}<br>權益 NT$ %{y:,.0f}<extra></extra>',
         ))
     fig.update_layout(
-        title=dict(text='Equity Curves', font=dict(color='#1660AB', size=14)),
-        xaxis_title='Time', yaxis_title='Equity (NTD)',
+        title=dict(text='各策略權益曲線', font=dict(color='#1660AB', size=14)),
+        xaxis_title='時間', yaxis_title='帳戶權益（元）',
         plot_bgcolor='#FDFAF0', paper_bgcolor='#FFFFFF',
         height=300, margin=dict(l=40, r=20, t=40, b=40),
-        font=dict(color='#2C3E50'),
+        font=dict(family='Microsoft JhengHei, PingFang TC, sans-serif', color='#2C3E50'),
         legend=dict(orientation='h', y=-0.2),
     )
     fig.update_xaxes(showgrid=True, gridcolor='rgba(22, 96, 171, 0.08)')
@@ -965,9 +948,71 @@ def build_excel_bytes(results: list, meta: dict) -> bytes:
 bt_results = st.session_state.bt_results
 bt_meta = st.session_state.bt_meta
 
+def find_best_strategy(results: list) -> Optional[dict]:
+    """依夏普比率挑「最佳主動策略」，排除 Buy & Hold。"""
+    candidates = []
+    for r in results:
+        if not r.kpi or 'Buy & Hold' in r.strategy_name:
+            continue
+        try:
+            sharpe = float(r.kpi.get('夏普比率', '0'))
+            roi    = float(str(r.kpi.get('ROI (報酬率)', '0')).replace('%', '').replace('+', '').strip())
+            candidates.append((sharpe, roi, r))
+        except (ValueError, TypeError):
+            continue
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    sharpe, roi, best = candidates[0]
+    return {
+        'name':    best.strategy_name,
+        'sharpe':  sharpe,
+        'roi':     roi,
+        'win_rate': best.kpi.get('勝率', '?'),
+        'mdd':     best.kpi.get('最大回撤 (MDD)', '?'),
+    }
+
+
+def find_buy_and_hold(results: list) -> Optional[dict]:
+    """從結果中挑出 Buy & Hold 當對照基準。"""
+    for r in results:
+        if 'Buy & Hold' in r.strategy_name and r.kpi:
+            try:
+                roi = float(str(r.kpi.get('ROI (報酬率)', '0')).replace('%', '').replace('+', '').strip())
+            except (ValueError, TypeError):
+                roi = 0.0
+            return {'name': r.strategy_name, 'roi': roi}
+    return None
+
+
 if bt_results:
     st.markdown('---')
     st.subheader('📊 策略回測結果')
+
+    # ⭐ 最佳策略推薦條 + Buy & Hold 對照
+    best = find_best_strategy(bt_results)
+    bh = find_buy_and_hold(bt_results)
+    if best:
+        beat_bh_msg = ''
+        if bh:
+            diff = best['roi'] - bh['roi']
+            if diff > 0:
+                beat_bh_msg = (
+                    f'　·　🎯 **勝過 Buy & Hold** {diff:+.2f}%'
+                    f'（基準 {bh["roi"]:+.2f}%）'
+                )
+            else:
+                beat_bh_msg = (
+                    f'　·　⚠ **不如 Buy & Hold**（{diff:+.2f}%，基準 {bh["roi"]:+.2f}%）'
+                )
+        st.success(
+            f'⭐ **推薦策略**：**{best["name"]}**　·　'
+            f'夏普 **{best["sharpe"]:.2f}**　·　'
+            f'ROI **{best["roi"]:+.2f}%**　·　'
+            f'勝率 **{best["win_rate"]}**　·　'
+            f'MDD **{best["mdd"]}**'
+            f'{beat_bh_msg}'
+        )
 
     bt_left, bt_right = st.columns([3, 2])
 

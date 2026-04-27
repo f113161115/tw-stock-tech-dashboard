@@ -15,6 +15,7 @@ Yahoo Finance 對 intraday 資料的限制：
 import yfinance as yf
 import pandas as pd
 import requests
+from functools import lru_cache
 from pathlib import Path
 from datetime import datetime
 from typing import NamedTuple, Optional
@@ -169,6 +170,26 @@ def save_data(df: pd.DataFrame, symbol: str, interval: str,
     df.to_csv(latest_path, index=False, encoding='utf-8-sig')
 
     return latest_path
+
+
+@lru_cache(maxsize=256)
+def fetch_stock_name(symbol: str) -> str:
+    """
+    從 Yahoo Finance 抓公司名（longName / shortName）。
+    用 lru_cache 快取（同 symbol 第二次呼叫直接回傳快取）。
+
+    回傳：公司名字串。若抓不到回傳 ''（空字串）。
+    """
+    try:
+        info = yf.Ticker(symbol).info
+        return (
+            info.get('longName')
+            or info.get('shortName')
+            or info.get('displayName')
+            or ''
+        )
+    except Exception:
+        return ''
 
 
 def export_to_excel(df: pd.DataFrame, symbol: str, interval: str,
