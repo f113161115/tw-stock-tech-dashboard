@@ -334,20 +334,38 @@ with st.sidebar:
     )
 
     st.markdown('**💰 交易成本（台股實際規則）**')
+
+    with st.expander('📖 常見券商手續費（自行抄到下方）', expanded=False):
+        st.markdown(
+            """
+            | 方案 | 折扣 | 費率 |
+            |---|---|---|
+            | 法定原價 | 1 折以下不可 | **0.1425%** |
+            | 元大 / 永豐 一般電子單 | 6 折 | **0.0855%** |
+            | 多家券商 VIP 5 折 | 5 折 | **0.0713%** |
+            | 多家券商熟客 4 折 | 4 折 | **0.0570%** |
+            | **國泰證券 電子單 2.8 折** ⭐ | **2.8 折** | **0.0399%** |
+            | 部分券商 1.68 折 | 1.68 折 | **0.0239%** |
+
+            > 計算方式：`法定 0.1425% × 折扣` ；下限多為 NT\\$ 20
+            > 看你實際用哪家券商，把對應費率填到下方欄位即可。
+            """
+        )
+
     col_cr, col_cm = st.columns(2)
     with col_cr:
         bt_comm_rate = st.number_input(
-            '手續費率 (%)',
+            '手續費率 (%) ─ 自行填寫',
             min_value=0.0, max_value=1.0,
             value=DEFAULT_COMMISSION_RATE * 100, step=0.0025, format='%.4f',
-            help='券商手續費率（買進+賣出皆收）。台股法定 0.1425%，實際各家券商常給 6 折或 4 折',
+            help='券商手續費率（買進+賣出皆收）。預設 0.1425% = 法定原價；國泰 2.8 折請填 0.0399',
             key='bt_comm_rate',
         )
     with col_cm:
         bt_comm_min = st.number_input(
             '手續費下限 (元)',
             min_value=1, max_value=200, value=int(DEFAULT_COMMISSION_MIN), step=1,
-            help='不足下限以下限收取（單筆手續費 < 下限時補到下限）',
+            help='單筆手續費若不足下限，以下限收取。台股各券商多為 NT$20',
             key='bt_comm_min',
         )
     bt_trade_type = st.radio(
